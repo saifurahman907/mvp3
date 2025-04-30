@@ -366,16 +366,28 @@ def upload_file():
         vectordb.add_documents(texts)
         print("Documents added to Chroma successfully")
 
+        # Generate a summary for the document
+        summary = chain_with_history_summary.invoke(
+            {"question": "Generate a full contract breakdown covering all sections...", "contract_id": contract_id},
+            config={"configurable": {"session_id": contract_id}}
+        )
+
         # Clean up temporary files
         try:
             shutil.rmtree(temp_dir)  # Clean up temp files
         except Exception as e:
             print(f"Error cleaning up temp directory: {e}")
 
-        return jsonify({"contract_id": contract_id, "message": "File uploaded and processed successfully"}), 200
+        # Return contract_id and the generated summary in the response
+        return jsonify({
+            "contract_id": contract_id,
+            "summary": summary  # Now returns the summary instead of the default message
+        }), 200
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
 
 # Handle chat requests
 @app.route('/chat', methods=['POST'])
