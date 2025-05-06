@@ -66,7 +66,8 @@ try:
             embedding_function=embedding,
             persist_directory=persist_directory
         )
-    print("Chroma initialized successfully")
+    print(f"Number of documents in the vector store: {len(vectordb.get()['documents'])}")
+
 
 except Exception as e:
     print("Error initializing Chroma:", str(e))
@@ -348,6 +349,7 @@ def upload_file():
         # Load the PDF
         loader = PyPDFLoader(temp_path)
         documents = loader.load()
+        print(f"Loaded {len(documents)} documents.")
 
         # Check if documents were loaded successfully
         if not documents:
@@ -355,6 +357,8 @@ def upload_file():
 
         # Split the documents into smaller chunks
         texts = text_splitter.split_documents(documents)
+        print(f"Created {len(texts)} chunks from the documents.")
+
 
         # Ensure that the metadata is set for each document
         for doc in texts:
@@ -366,11 +370,16 @@ def upload_file():
         vectordb.add_documents(texts)
         print("Documents added to Chroma successfully")
 
+        # Check how many documents are now in the vector store
+        print(f"Number of documents in the vector store: {len(vectordb.get()['documents'])}")
+
         # Generate a summary for the document
         summary = chain_with_history_summary.invoke(
             {"question": "Generate a full contract breakdown covering all sections...", "contract_id": contract_id},
             config={"configurable": {"session_id": contract_id}}
         )
+        print(f"Generated summary: {summary}")
+
 
         # Clean up temporary files
         try:
@@ -406,6 +415,7 @@ def handle_chat():
     except Exception as e:
         return jsonify({"error": f"Error accessing vector store: {str(e)}"}), 500
 
+
     try:
         response = chain_with_history_chat.invoke(
             {"question": data['question'], "contract_id": contract_id},
@@ -413,7 +423,9 @@ def handle_chat():
         )
         return jsonify({"answer": response}), 200
     except Exception as e:
-        return jsonify({"error": f"Error processing chat request: {str(e)}"}), 500
+        print(f"Error occurred: {e}")  # Log the full error to the console for debugging
+        return jsonify({"error": str(e)}), 500
+
 
 # List all contracts
 @app.route('/contracts', methods=['GET'])
