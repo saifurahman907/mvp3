@@ -2,14 +2,22 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import PyPDFLoader
+
+from langchain_chroma import Chroma
+
+# Updated imports
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
+
+# Corrected import for RecursiveCharacterTextSplitter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Use the correct import for output parsing
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.document_loaders import DirectoryLoader
+
 from operator import itemgetter
 import uuid
 
@@ -19,7 +27,6 @@ import threading
 import time
 import shutil
 from langchain_core.runnables import RunnableLambda
-
 
 
 if os.path.exists("vector_store"):
@@ -41,11 +48,6 @@ else:
 
 app = Flask(__name__)
 CORS(app)
-
-# embedding = OpenAIEmbeddings(model="text-embedding-3-small")
-# text_splitter = RecursiveCharacterTextSplitter(
-#     chunk_size=4000, chunk_overlap=300)
-
 
 persist_directory = "vector_store"
 embedding = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -72,9 +74,6 @@ try:
 except Exception as e:
     print("Error initializing Chroma:", str(e))
     raise
-
-
-
 
 
 def format_docs(docs):
@@ -258,6 +257,10 @@ prompt_chat = ChatPromptTemplate.from_messages([
     ("human", "{question}"),
 ])
 
+# Use StrOutputParser instead of RetryOutputParser
+output_parser = StrOutputParser()
+
+# Use the correct output parser with the chains
 chain_summary = (
     {
         "context": RunnableLambda(
@@ -270,7 +273,7 @@ chain_summary = (
     }
     | prompt_summary
     | llm
-    | StrOutputParser()
+    | output_parser  # Use StrOutputParser
 )
 
 chain_chat = (
@@ -285,8 +288,9 @@ chain_chat = (
     }
     | prompt_chat
     | llm
-    | StrOutputParser()
+    | output_parser  # Use StrOutputParser here as well
 )
+
 
 # Session management
 message_histories = {}
@@ -394,6 +398,7 @@ def upload_file():
         }), 200
     
     except Exception as e:
+        print(f"Upload error: {str(e)}")  # Add more detailed error logging
         return jsonify({"error": str(e)}), 500
 
 
