@@ -8,16 +8,12 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from langchain_chroma import Chroma
-
 # Updated imports
 from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
-
 # Corrected import for RecursiveCharacterTextSplitter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 # Use the correct import for output parsing
 from langchain_core.output_parsers import StrOutputParser
-
 from operator import itemgetter
 import uuid
 
@@ -387,7 +383,7 @@ def upload_file():
 
         # Clean up temporary files
         try:
-            shutil.rmtree(temp_dir)  # Clean up temp files
+            shutil.rmtree(temp_dir)  
         except Exception as e:
             print(f"Error cleaning up temp directory: {e}")
 
