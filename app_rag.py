@@ -433,19 +433,24 @@ def handle_chat():
 
 
 # List all contracts
+
 @app.route('/contracts', methods=['GET'])
 def get_contracts():
     """Endpoint to list all uploaded contracts"""
     if not message_histories:
         return jsonify({"message": "No contracts found. Please upload documents to start."}), 404
 
-    contracts_list = [
-        {
+    contracts_list = []
+    
+    for contract_id, history in message_histories.items():
+        # Get the most recent AI message as the summary
+        ai_messages = [msg.content for msg in history.messages if msg.type == "ai"]
+        summary = ai_messages[-1] if ai_messages else "No summary available"
+        
+        contracts_list.append({
             "contract_id": contract_id,
-            "summary": next((msg.content for msg in history.messages if msg.type == "ai"), "No summary available")
-        }
-        for contract_id, history in message_histories.items()
-    ]
+            "summary": summary
+        })
 
     return jsonify(contracts_list), 200
 
