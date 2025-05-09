@@ -25,6 +25,7 @@ import shutil
 from langchain_core.runnables import RunnableLambda
 
 
+# Delete the vector_store directory if it exists
 if os.path.exists("vector_store"):
     shutil.rmtree("vector_store")
 
@@ -45,7 +46,35 @@ else:
 app = Flask(__name__)
 CORS(app)
 
+# Directory for vector store
 persist_directory = "vector_store"
+
+# Ensure Chroma database is closed before attempting to delete
+def close_chroma(vectordb):
+    """Close Chroma database gracefully if possible."""
+    if hasattr(vectordb, 'close'):
+        vectordb.close()
+        print("Chroma vector store closed.")
+
+# Retry deletion function
+def delete_vector_store_with_retry(path, retries=5, delay=1):
+    """Attempts to delete the vector_store directory with retries."""
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)  # Try to delete the directory
+            print(f"Directory deleted successfully.")
+            return True
+        except PermissionError as e:
+            print(f"Error deleting directory: {e}. Retrying... ({attempt + 1}/{retries})")
+            time.sleep(delay)  # Wait before retrying
+    print("Failed to delete directory after all retries.")
+    return False
+
+
+# Set maximum file size to 16MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+
+# Initialize embeddings and text splitter
 embedding = OpenAIEmbeddings(model="text-embedding-3-small")
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2500, chunk_overlap=300)
@@ -65,7 +94,6 @@ try:
             persist_directory=persist_directory
         )
     print(f"Number of documents in the vector store: {len(vectordb.get()['documents'])}")
-
 
 except Exception as e:
     print("Error initializing Chroma:", str(e))
@@ -240,12 +268,12 @@ chat_prompt = """
                 Question: {question}
                 """
 
+
 prompt_summary = ChatPromptTemplate.from_messages([
     ("system", Summary_prompt),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{question}"),
 ])
-
 
 prompt_chat = ChatPromptTemplate.from_messages([
     ("system", chat_prompt),
@@ -292,13 +320,11 @@ chain_chat = (
 message_histories = {}
 session_creation_times = {}
 
-
 def get_message_history(contract_id: str) -> ChatMessageHistory:
     if contract_id not in message_histories:
         message_histories[contract_id] = ChatMessageHistory()
         message_histories[contract_id].add_ai_message("How can I help you?")
     return message_histories[contract_id]
-
 
 chain_with_history_summary = RunnableWithMessageHistory(
     chain_summary,
@@ -314,89 +340,115 @@ chain_with_history_chat = RunnableWithMessageHistory(
     history_messages_key="history",
 )
 
-
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
+        # Initialize Chroma vector store
+        embedding = OpenAIEmbeddings(model="text-embedding-3-small")
+        vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
+
+        # Clean up previous vector store if necessary
+        close_chroma(vectordb)  # Close the previous Chroma instance if open
+        delete_vector_store_with_retry(persist_directory)  # Delete the previous vector store directory
+
         # Check if file is provided
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
-        
-        file = request.files['file']
-        
-        # Validate file
-        if not file or file.filename == '':
-            return jsonify({"error": "Empty filename"}), 400
 
+        file = request.files['file']
+        file.seek(0)  # Reset the file pointer
+
+        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             return jsonify({"error": "Only PDF files accepted"}), 400
-        
-        # We'll use the already initialized vectordb instance
-        print("Using existing Chroma instance")
 
-        # Ensure the uploaded PDF file is processed into documents and split into chunks
-        contract_id = str(uuid.uuid4())
+        # Process new file
+        contract_id = str(uuid.uuid4())  # Generate new contract ID
         temp_dir = os.path.join("temp_uploads", contract_id)
         os.makedirs(temp_dir, exist_ok=True)
         temp_path = os.path.join(temp_dir, file.filename)
-
-        file.save(temp_path)  # Save the uploaded file
-
-        # Validate file size
-        if os.path.getsize(temp_path) == 0:
-            return jsonify({"error": "Uploaded file is empty"}), 400
+        file.save(temp_path)
 
         # Load the PDF
         loader = PyPDFLoader(temp_path)
         documents = loader.load()
-        print(f"Loaded {len(documents)} documents.")
 
-        # Check if documents were loaded successfully
         if not documents:
-            return jsonify({"error": "PDF text extraction failed - document may be scanned or encrypted"}), 400
+            return jsonify({"error": "PDF text extraction failed"}), 400
 
         # Split the documents into smaller chunks
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2500, chunk_overlap=300)
         texts = text_splitter.split_documents(documents)
-        print(f"Created {len(texts)} chunks from the documents.")
+        
+        # Add metadata to each document chunk
+        for text in texts:
+            text.metadata["contract_id"] = contract_id
 
-
-        # Ensure that the metadata is set for each document
-        for doc in texts:
-            if not doc.metadata:
-                doc.metadata = {}
-            doc.metadata["contract_id"] = contract_id
-
-        # Add documents to the Chroma vector store
+        # Add documents to Chroma
         vectordb.add_documents(texts)
-        print("Documents added to Chroma successfully")
+        print(f"Added {len(texts)} documents to Chroma.")
 
-        # Check how many documents are now in the vector store
-        print(f"Number of documents in the vector store: {len(vectordb.get()['documents'])}")
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir)
 
-        # Generate a summary for the document
-        summary = chain_with_history_summary.invoke(
-            {"question": "Generate a full contract breakdown covering all sections...", "contract_id": contract_id},
-            config={"configurable": {"session_id": contract_id}}
+        # Fetch the full summary using the updated model logic
+        summary = generate_full_summary(contract_id)  # This function should get the full contract context and generate the detailed summary.
+
+        return jsonify({"contract_id": contract_id, "summary": summary}), 200
+
+    except Exception as e:
+        print(f"Error during file upload: {str(e)}")  # Log the full error
+        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
+
+
+def get_retriever(contract_id):
+    # Initialize the embedding function and vectordb
+    embedding = OpenAIEmbeddings(model="text-embedding-3-small")
+    vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
+    
+    # Get the retriever using `as_retriever()`
+    retriever = vectordb.as_retriever(
+        search_kwargs={"filter": {"contract_id": contract_id}, "k": 35}
+    )
+    return retriever
+
+def format_docs(docs):
+    # Format the documents into a single string
+    return "\n\n".join([doc.page_content for doc in docs])
+
+def generate_full_summary(contract_id):
+    try:
+        # Retrieve the context from the vector store using the retriever
+        retriever = get_retriever(contract_id)
+        
+        # Provide a placeholder query to fetch the relevant documents
+        query = "Provide the full contract details to generate the summary."
+
+        # Retrieve the relevant documents using the query
+        documents = retriever.get_relevant_documents(query)
+        
+        if not documents:
+            return "No documents found for the given contract."
+        
+        # Format the documents to create the full summary
+        context = format_docs(documents)
+        
+        # Create a properly formatted prompt for the LLM
+        formatted_prompt = prompt_summary.format(
+            question="Generate a comprehensive summary of this contract",
+            context=context,
+            history=[]  # Pass an empty list instead of a string
         )
-        print(f"Generated summary: {summary}")
-
-
-        # Clean up temporary files
-        try:
-            shutil.rmtree(temp_dir)  
-        except Exception as e:
-            print(f"Error cleaning up temp directory: {e}")
-
-        # Return contract_id and the generated summary in the response
-        return jsonify({
-            "contract_id": contract_id,
-            "summary": summary  # Now returns the summary instead of the default message
-        }), 200
+        
+        # Use the formatted prompt with the LLM
+        response = llm.invoke(formatted_prompt)
+        
+        # Extract the content from the response
+        return response.content
     
     except Exception as e:
-        print(f"Upload error: {str(e)}")  # Add more detailed error logging
-        return jsonify({"error": str(e)}), 500
-
+        print(f"Error generating summary: {str(e)}")
+        return f"Error generating summary: {str(e)}"
 
 
 # Handle chat requests
@@ -408,6 +460,10 @@ def handle_chat():
 
     contract_id = data['contract_id']
 
+    # Initialize the embedding function and vectordb
+    embedding = OpenAIEmbeddings(model="text-embedding-3-small")
+    vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
+
     # Check if the vector store is empty
     try:
         documents = vectordb.get()["documents"]
@@ -416,8 +472,11 @@ def handle_chat():
     except Exception as e:
         return jsonify({"error": f"Error accessing vector store: {str(e)}"}), 500
 
-
     try:
+        # Initialize the message history for this contract if it doesn't exist
+        if contract_id not in message_histories:
+            message_histories[contract_id] = ChatMessageHistory()
+        
         response = chain_with_history_chat.invoke(
             {"question": data['question'], "contract_id": contract_id},
             config={"configurable": {"session_id": contract_id}}
@@ -429,7 +488,6 @@ def handle_chat():
 
 
 # List all contracts
-
 @app.route('/contracts', methods=['GET'])
 def get_contracts():
     """Endpoint to list all uploaded contracts"""
