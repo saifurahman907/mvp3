@@ -1,2 +1,54 @@
-myenv
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+
+# Virtual Environment
+.venv/
+env/
+venv/
+myenv/
+temp_uploads/
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+vector_store
 .env
+# PyCharm
+.idea/
+vector_stores
+# VS Code
+.vscode/
+vector_store
+# dotenv
+.env
+temp_uploads/
+# Temporary files
+temp_uploads/
+
+# Chroma vector stores
+vector_stores/
+
+vector_store/
+
+# Other
+*.log
+*.bak
+*.swp
+*.tmp
+
+# Build and distribution directories
+build/
+dist/
+*.egg-info/
+
+# Database files
+*.sqlite3
+*.db
+
+# MacOS files
+.DS_Store
+
+# Windows thumbnail cache
+Thumbs.db

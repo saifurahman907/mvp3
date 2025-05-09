@@ -1,26 +1,27 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import uuid
+import shutil
+import threading
+import time
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+# For asynchronous processing
+from concurrent.futures import ThreadPoolExecutor
+
+# LangChain imports
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
-# Updated imports
-from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
-# Corrected import for RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-# Use the correct import for output parsing
 from langchain_core.output_parsers import StrOutputParser
-from operator import itemgetter
-import uuid
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import threading
-import time
-import shutil
 from langchain_core.runnables import RunnableLambda
-
+from operator import itemgetter
 
 # Load environment variables
 load_dotenv()
@@ -35,30 +36,35 @@ else:
     print("API key loaded successfully!")
 
 app = Flask(__name__)
-# Improved CORS configuration
-CORS(app)
+# Configure CORS with appropriate settings
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Base directory for vector stores
 VECTOR_STORE_BASE_DIR = "vector_stores"
 os.makedirs(VECTOR_STORE_BASE_DIR, exist_ok=True)
 
+# Temporary upload directory
+TEMP_UPLOAD_DIR = "temp_uploads"
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
 # Dictionary to store contract_id -> vector_store_path mapping
 contract_vector_stores = {}
+
+# Dictionary to track processing status
+processing_status = {}
 
 # Initialize embeddings and text splitter
 embedding = OpenAIEmbeddings(model="text-embedding-3-small")
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=2500, chunk_overlap=300)
+    chunk_size=1000,  # Reduced chunk size for faster processing
+    chunk_overlap=100  # Reduced overlap
+)
 
+# Create a thread pool for background processing
+executor = ThreadPoolExecutor(max_workers=5)
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
-
-
-def print_me(x):
-    print(x)
-    return x
-
 
 # Improved Retriever Function
 def get_retriever(contract_id):
@@ -90,7 +96,7 @@ def get_retriever(contract_id):
             print(f"Warning: No documents in vector store for contract ID: {contract_id}")
             return None
             
-        return vectordb.as_retriever(search_kwargs={"k": 35})
+        return vectordb.as_retriever(search_kwargs={"k": 20})  # Reduced k for faster retrieval
     except Exception as e:
         print(f"Error getting retriever for contract {contract_id}: {str(e)}")
         # If there's an error, clean up the tracking
@@ -98,10 +104,15 @@ def get_retriever(contract_id):
             del contract_vector_stores[contract_id]
         return None
 
+# LLM with timeout configuration
+llm = ChatOpenAI(
+    model="gpt-4o", 
+    api_key=api_key,
+    request_timeout=90,  # Increased timeout for API calls
+    max_retries=3  # Add retries for resilience
+)
 
-# LLM and prompt
-llm = ChatOpenAI(model="gpt-4o", api_key=api_key)
-
+# Summary prompt (shortened for brevity)
 Summary_prompt = """
                 History:
                 {history}
@@ -111,116 +122,22 @@ Summary_prompt = """
 
                 Role: You are a contract law expert specializing in UK construction contracts. Your audience is made up of non-technical construction professionals who are not experts in contracts.
 
-                Task: Using the provided context, produce a detailed summary of the contract. Write in clear, simple, everyday language, and explain any technical terms so that a layperson can easily understand. Your summary should include all the essential points and explanations in natural language with reasonable context.
+                Task: Using the provided context, produce a detailed summary of the contract. Write in clear, simple, everyday language, and explain any technical terms so that a layperson can easily understand.
 
                 FORMAT REQUIREMENTS:
-                - Use CAPITALIZED HEADINGS for main sections exactly as listed in the template (e.g., DOCUMENTS, CONTRACT FORM)
-                - Under each heading, include the specific question as an indented sub-heading exactly as written in the template
+                - Use CAPITALIZED HEADINGS for main sections
                 - Present answers as bullet points with reasonable context
                 - Keep explanations brief and in layman's terms
                 - Bold key dates, values, and timeframes using **bold** markdown
 
-                Please address the following areas:
-
+                Please address the key contract areas focusing on:
                 1. DOCUMENTS
-                    What documents are included in this contract?
-                    • List all the uploaded documents (e.g. contract, order, minutes, etc.).
-
                 2. CONTRACT FORM
-                    What form of contract is being used?
-                    • Identify the form of contract (e.g. Contract Noggin 2016 Design & Build, Contract Noggin Intermediate 2016, etc.).
-
                 3. PAYMENTS
-                    What are the payment terms?
-                    • Describe the payment terms in simple language.
-                    
-                    How long before the final due date can a pay-less notice be issued?
-                    • Explain with exact number of days and cite relevant sections.
-
                 4. TERMINATION
-                    What are the termination provisions?
-                    • Summarize the termination clauses.
-                    
-                    What costs are involved if the contract is terminated?
-                    • Explain the financial implications of termination.
-
                 5. SUSPENSION
-                    Under what circumstances can the works be suspended?
-                    • Clarify the suspension conditions.
-                    
-                    What notice is required for suspension?
-                    • Detail notice periods and required information.
-                    
-                    Can the subcontractor charge for resuming work after suspension?
-                    • Explain costs and limitations.
-
                 6. VARIATIONS
-                    How are contract variations handled?
-                    • Summarize variation clauses.
-                    
-                    What is the time limit for submitting a variation?
-                    • Specify exact timeframes.
-                    
-                    Is prior approval needed before starting variations?
-                    • Clarify approval requirements.
-                    
-                    Who can authorize variations?
-                    • Identify authorized parties.
-                    
-                    Must the subcontractor proceed without prior sign-off?
-                    • State conditions for proceeding and payment risks.
-
-                7. DAY WORKS
-                    What are the daywork rates and calculations?
-                    • Describe rates and percentage calculations.
-                    
-                    What is included in these rates?
-                    • Explain inclusions (supervisors, labor, plant) and exclusions.
-
-                8. EXTENSIONS OF TIME
-                    What are valid grounds for extension of time?
-                    • Outline qualifying circumstances.
-                    
-                    What information must be included in an Extension of Time submission?
-                    • Summarize required documentation.
-
-                9. RETENTION
-                    What percentage of retention is held?
-                    • State the retention percentage.
-                    
-                    What is the total retention amount?
-                    • Calculate if contract sum is provided.
-                    
-                    How long is the defects period?
-                    • Explain duration and start timing.
-
-                10. ADJUDICATION
-                    Does the subcontractor have adjudication rights?
-                    • Clarify adjudication provisions.
-                    
-                    Are adjudicator fees fixed or capped?
-                    • Provide fee structure if specified.
-
-                11. ENTIRE AGREEMENT CLAUSE
-                    What documents form the entire agreement?
-                    • Explain which documents are contractually binding.
-
-                12. PROGRAMME
-                    What is the weekly value of work required?
-                    • Calculate based on programme duration and contract sum.
-                    
-                    Is the programme a numbered document?
-                    • Confirm document status.
-                    
-                    What is the value of Liquidated and Ascertained Damages?
-                    • Identify LAD values.
-                    
-                    Do LADs exceed 1% for 10 weeks maximum?
-                    • Assess against recommended thresholds.
-
-                13. KEY RISKS
-                    What are the main risks in this contract?
-                    • Highlight significant risks in plain language.
+                7. KEY RISKS
 
                 Questions:
                 {question}
@@ -236,21 +153,17 @@ chat_prompt = """
                 {context}
                 
                 FORMAT REQUIREMENTS:
-                - Use CAPITALIZED HEADINGS for main sections exactly as listed in the template
-                - Under each heading, include the specific question as an indented sub-heading exactly as written
+                - Use CAPITALIZED HEADINGS for main sections
                 - Present answers as bullet points with reasonable context
                 - Use natural language and layman's terms
                 - Keep explanations brief and practical
-                - Bold key dates, values, and timeframes using **bold** markdown
                 
                 When information is not found in the contract:
                 - State simply: "This contract doesn't specify..."
                 - Suggest what the user might want to clarify
-                - Provide a brief explanation of what would typically be expected
                 
                 Question: {question}
                 """
-
 
 prompt_summary = ChatPromptTemplate.from_messages([
     ("system", Summary_prompt),
@@ -264,10 +177,9 @@ prompt_chat = ChatPromptTemplate.from_messages([
     ("human", "{question}"),
 ])
 
-# Use StrOutputParser instead of RetryOutputParser
 output_parser = StrOutputParser()
 
-# Use the correct output parser with the chains
+# Chain for summary generation
 chain_summary = (
     {
         "context": RunnableLambda(
@@ -280,9 +192,10 @@ chain_summary = (
     }
     | prompt_summary
     | llm
-    | output_parser  # Use StrOutputParser
+    | output_parser
 )
 
+# Chain for chat interactions
 chain_chat = (
     {
         "context": RunnableLambda(
@@ -295,9 +208,8 @@ chain_chat = (
     }
     | prompt_chat
     | llm
-    | output_parser  # Use StrOutputParser here as well
+    | output_parser
 )
-
 
 # Session management
 message_histories = {}
@@ -325,7 +237,72 @@ chain_with_history_chat = RunnableWithMessageHistory(
     history_messages_key="history",
 )
 
-# Improved upload handler with better error tracking
+# Background processing function for PDFs
+def process_pdf_in_background(contract_id, file_path):
+    try:
+        vector_store_path = contract_vector_stores[contract_id]
+        processing_status[contract_id] = "processing"
+        
+        # Load the PDF
+        loader = PyPDFLoader(file_path)
+        documents = loader.load()
+        
+        if not documents:
+            processing_status[contract_id] = "failed"
+            print(f"No content extracted from PDF for contract {contract_id}")
+            return
+            
+        # Split the documents into smaller chunks
+        chunks = text_splitter.split_documents(documents)
+        
+        # Add metadata to each document chunk
+        for chunk in chunks:
+            chunk.metadata["contract_id"] = contract_id
+            
+        # Process in batches to avoid memory issues
+        batch_size = 50
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i+batch_size]
+            
+            # Initialize vector store
+            vectordb = Chroma(
+                persist_directory=vector_store_path,
+                embedding_function=embedding
+            )
+            
+            # Add documents to Chroma
+            vectordb.add_documents(batch)
+            print(f"Added batch {i//batch_size + 1} of {len(chunks)//batch_size + 1} to vector store")
+        
+        # Generate summary in background
+        try:
+            summary = generate_full_summary(contract_id)
+            processing_status[contract_id] = "completed"
+            
+            # Store summary in message history
+            if contract_id in message_histories:
+                message_histories[contract_id] = ChatMessageHistory()
+                message_histories[contract_id].add_ai_message(summary)
+                
+        except Exception as e:
+            print(f"Error generating summary: {str(e)}")
+            processing_status[contract_id] = "summary_failed"
+            
+        # Clean up temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
+    except Exception as e:
+        processing_status[contract_id] = "failed"
+        print(f"Error processing PDF in background: {str(e)}")
+        
+        # Clean up on error
+        if os.path.exists(vector_store_path):
+            shutil.rmtree(vector_store_path)
+        if contract_id in contract_vector_stores:
+            del contract_vector_stores[contract_id]
+
+# Upload endpoint with streaming processing
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
@@ -354,72 +331,30 @@ def upload_file():
         session_creation_times[contract_id] = datetime.now()
         
         # Create a temporary directory for processing
-        temp_dir = os.path.join("temp_uploads", contract_id)
+        temp_dir = os.path.join(TEMP_UPLOAD_DIR, contract_id)
         os.makedirs(temp_dir, exist_ok=True)
         
         # Save the file
         temp_path = os.path.join(temp_dir, file.filename)
         file.save(temp_path)
         
-        # Load the PDF
-        try:
-            loader = PyPDFLoader(temp_path)
-            documents = loader.load()
-            
-            if not documents:
-                # Clean up on error
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                if os.path.exists(vector_store_path):
-                    shutil.rmtree(vector_store_path)
-                if contract_id in contract_vector_stores:
-                    del contract_vector_stores[contract_id]
-                if contract_id in session_creation_times:
-                    del session_creation_times[contract_id]
-                return jsonify({"error": "PDF text extraction failed"}), 400
-                
-            # Split the documents into smaller chunks
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=2500, chunk_overlap=300)
-            texts = text_splitter.split_documents(documents)
-            
-            # Add metadata to each document chunk
-            for text in texts:
-                text.metadata["contract_id"] = contract_id
-                
-            # Initialize a new vector store for this contract
-            vectordb = Chroma(
-                persist_directory=vector_store_path,
-                embedding_function=embedding
-            )
-            
-            # Add documents to Chroma
-            vectordb.add_documents(texts)
-            print(f"Added {len(texts)} documents to vector store at {vector_store_path}")
-            
-            # Clean up temporary directory
-            shutil.rmtree(temp_dir)
-            
-            # Generate full summary
-            summary = generate_full_summary(contract_id)
-            
-            return jsonify({"contract_id": contract_id, "summary": summary}), 200
-            
-        except Exception as e:
-            print(f"Error processing PDF: {str(e)}")
-            # Clean up on error
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-            if os.path.exists(vector_store_path):
-                shutil.rmtree(vector_store_path)
-            if contract_id in contract_vector_stores:
-                del contract_vector_stores[contract_id]
-            if contract_id in session_creation_times:
-                del session_creation_times[contract_id]
-            return jsonify({"error": f"Error processing PDF: {str(e)}"}), 500
+        # Set initial processing status
+        processing_status[contract_id] = "started"
+        
+        # Start background processing
+        executor.submit(process_pdf_in_background, contract_id, temp_path)
+        
+        # Return immediately with contract_id
+        return jsonify({
+            "contract_id": contract_id, 
+            "message": "Document upload accepted and processing has started. Use the /contract endpoint to check progress."
+        }), 200
             
     except Exception as e:
         print(f"Error during file upload: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
+
+# Status is now checked through the /contract endpoint
 
 # Fixed Summary Generation Function
 def generate_full_summary(contract_id):
@@ -445,18 +380,11 @@ def generate_full_summary(contract_id):
             )
             
             # Create a retriever for this contract
-            retriever = vectordb.as_retriever(search_kwargs={"k": 35})
+            retriever = vectordb.as_retriever(search_kwargs={"k": 20})  # Reduced k for faster retrieval
             
-            # Use the newer invoke() method instead of get_relevant_documents()
-            query = "Provide the full contract details to generate the summary."
-            
-            try:
-                # Try the newer method first
-                documents = retriever.invoke(query)
-            except Exception as e:
-                print(f"Error using invoke method: {str(e)}")
-                # Fall back to the deprecated method
-                documents = retriever.get_relevant_documents(query)
+            # Use the newer invoke() method
+            query = "Provide the key contract details to generate the summary."
+            documents = retriever.invoke(query)
             
             if not documents:
                 return "No documents found for the given contract."
@@ -476,7 +404,7 @@ def generate_full_summary(contract_id):
             # Use the LLM to generate the summary
             response = llm.invoke(
                 prompt_summary.format(
-                    question="Generate a comprehensive summary of this contract",
+                    question="Generate a concise summary of this contract",
                     context=context,
                     history=history_messages
                 )
@@ -500,7 +428,6 @@ def generate_full_summary(contract_id):
         print(f"Error generating summary: {str(e)}")
         return f"Error generating summary: {str(e)}"
 
-
 # Handle chat requests
 @app.route('/chat', methods=['POST'])
 def handle_chat():
@@ -513,6 +440,13 @@ def handle_chat():
     # Check if the contract exists
     if contract_id not in contract_vector_stores:
         return jsonify({"error": f"Contract ID not found: {contract_id}"}), 404
+        
+    # Check if processing is still in progress
+    if contract_id in processing_status and processing_status[contract_id] != "completed":
+        return jsonify({
+            "processing": True,
+            "message": "Document is still being processed. Please wait until processing is complete."
+        }), 202  # 202 Accepted indicates the request was valid but processing is not complete
         
     try:
         # Check if vector store directory exists
@@ -548,7 +482,6 @@ def handle_chat():
         print(f"Error occurred during chat: {e}")
         return jsonify({"error": str(e)}), 500
 
-
 # List all contracts
 @app.route('/contracts', methods=['GET'])
 def get_contracts():
@@ -565,10 +498,15 @@ def get_contracts():
                 del message_histories[contract_id]
             if contract_id in session_creation_times:
                 del session_creation_times[contract_id]
+            if contract_id in processing_status:
+                del processing_status[contract_id]
             continue
             
-        # Get history if it exists
-        if contract_id in message_histories:
+        # Get status
+        status = processing_status.get(contract_id, "unknown")
+        
+        # Only include fully processed contracts with summaries
+        if status == "completed" and contract_id in message_histories:
             history = message_histories[contract_id]
             # Get the most recent AI message as the summary
             ai_messages = [msg.content for msg in history.messages if msg.type == "ai"]
@@ -578,22 +516,45 @@ def get_contracts():
                 "contract_id": contract_id,
                 "summary": summary
             })
+        else:
+            # Include contracts that are still processing, but without summary
+            contracts_list.append({
+                "contract_id": contract_id,
+                "status": status
+            })
 
     if not contracts_list:
         return jsonify({"message": "No contracts found. Please upload documents to start."}), 404
         
     return jsonify(contracts_list), 200
 
-
-# Endpoint to check contract existence
+# Endpoint to check contract existence and processing status
 @app.route('/contract/<contract_id>', methods=['GET'])
 def check_contract(contract_id):
-    """Check if a specific contract exists"""
+    """Check if a specific contract exists and its processing status"""
     if contract_id in contract_vector_stores:
         # Verify the directory actually exists
         vector_store_path = contract_vector_stores[contract_id]
         if os.path.exists(vector_store_path):
-            return jsonify({"exists": True}), 200
+            # Get status
+            status = processing_status.get(contract_id, "unknown")
+            
+            # Get summary if processing is complete
+            summary = None
+            if status == "completed" and contract_id in message_histories:
+                ai_messages = [msg.content for msg in message_histories[contract_id].messages if msg.type == "ai"]
+                summary = ai_messages[-1] if ai_messages else None
+                
+            response_data = {
+                "exists": True,
+                "status": status
+            }
+            
+            # Include summary if available
+            if summary:
+                response_data["summary"] = summary
+                
+            return jsonify(response_data), 200
         else:
             # Clean up tracking for non-existent directory
             del contract_vector_stores[contract_id]
@@ -604,7 +565,6 @@ def check_contract(contract_id):
             return jsonify({"exists": False}), 404
     else:
         return jsonify({"exists": False}), 404
-
 
 # Cleanup function to remove old sessions
 def cleanup_old_sessions():
@@ -626,6 +586,8 @@ def cleanup_old_sessions():
                     del message_histories[contract_id]
                 if contract_id in session_creation_times:
                     del session_creation_times[contract_id]
+                if contract_id in processing_status:
+                    del processing_status[contract_id]
                     
                 # Remove vector store
                 if contract_id in contract_vector_stores:
@@ -641,7 +603,6 @@ def cleanup_old_sessions():
             print(f"Error in cleanup task: {str(e)}")
             time.sleep(3600)  # Still sleep on error
 
-
 # Add CORS headers to all responses
 @app.after_request
 def after_request(response):
@@ -655,4 +616,5 @@ cleanup_thread = threading.Thread(target=cleanup_old_sessions, daemon=True)
 cleanup_thread.start()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    # Use threaded=True for better handling of concurrent requests
+    app.run(host='0.0.0.0', port=5000, threaded=True)
