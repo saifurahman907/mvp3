@@ -303,6 +303,7 @@ def process_pdf_in_background(contract_id, file_path):
             del contract_vector_stores[contract_id]
 
 # Upload endpoint with streaming processing
+# Upload endpoint with summary in response
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
@@ -338,17 +339,60 @@ def upload_file():
         temp_path = os.path.join(temp_dir, file.filename)
         file.save(temp_path)
         
-        # Set initial processing status
-        processing_status[contract_id] = "started"
-        
-        # Start background processing
-        executor.submit(process_pdf_in_background, contract_id, temp_path)
-        
-        # Return immediately with contract_id
-        return jsonify({
-            "contract_id": contract_id, 
-            "message": "Document upload accepted and processing has started. Use the /contract endpoint to check progress."
-        }), 200
+        # Process PDF synchronously to get the summary immediately
+        try:
+            # Load the PDF
+            loader = PyPDFLoader(temp_path)
+            documents = loader.load()
+            
+            if not documents:
+                return jsonify({"error": "No content extracted from PDF"}), 400
+                
+            # Split the documents into smaller chunks
+            chunks = text_splitter.split_documents(documents)
+            
+            # Add metadata to each document chunk
+            for chunk in chunks:
+                chunk.metadata["contract_id"] = contract_id
+                
+            # Process in batches to avoid memory issues
+            batch_size = 50
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i+batch_size]
+                
+                # Initialize vector store
+                vectordb = Chroma(
+                    persist_directory=vector_store_path,
+                    embedding_function=embedding
+                )
+                
+                # Add documents to Chroma
+                vectordb.add_documents(batch)
+            
+            # Generate summary immediately
+            summary = generate_full_summary(contract_id)
+            processing_status[contract_id] = "completed"
+            
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+            # Return with contract_id and full summary
+            return jsonify({
+                "contract_id": contract_id,
+                "summary": summary
+            }), 200
+                
+        except Exception as e:
+            # If immediate processing fails, fall back to background processing
+            processing_status[contract_id] = "started"
+            executor.submit(process_pdf_in_background, contract_id, temp_path)
+            
+            return jsonify({
+                "contract_id": contract_id, 
+                "message": "Document processing in progress. Summary not immediately available.",
+                "status": "processing"
+            }), 202
             
     except Exception as e:
         print(f"Error during file upload: {str(e)}")
