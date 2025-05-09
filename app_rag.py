@@ -25,12 +25,6 @@ import shutil
 from langchain_core.runnables import RunnableLambda
 
 
-# Delete the vector_store directory if it exists
-if os.path.exists("vector_store"):
-    shutil.rmtree("vector_store")
-
-
-load_dotenv()
 # Load environment variables
 load_dotenv()
 
@@ -46,58 +40,17 @@ else:
 app = Flask(__name__)
 CORS(app)
 
-# Directory for vector store
-persist_directory = "vector_store"
+# Base directory for vector stores
+VECTOR_STORE_BASE_DIR = "vector_stores"
+os.makedirs(VECTOR_STORE_BASE_DIR, exist_ok=True)
 
-# Ensure Chroma database is closed before attempting to delete
-def close_chroma(vectordb):
-    """Close Chroma database gracefully if possible."""
-    if hasattr(vectordb, 'close'):
-        vectordb.close()
-        print("Chroma vector store closed.")
-
-# Retry deletion function
-def delete_vector_store_with_retry(path, retries=5, delay=1):
-    """Attempts to delete the vector_store directory with retries."""
-    for attempt in range(retries):
-        try:
-            shutil.rmtree(path)  # Try to delete the directory
-            print(f"Directory deleted successfully.")
-            return True
-        except PermissionError as e:
-            print(f"Error deleting directory: {e}. Retrying... ({attempt + 1}/{retries})")
-            time.sleep(delay)  # Wait before retrying
-    print("Failed to delete directory after all retries.")
-    return False
-
-
-# Set maximum file size to 16MB
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+# Dictionary to store contract_id -> vector_store_path mapping
+contract_vector_stores = {}
 
 # Initialize embeddings and text splitter
 embedding = OpenAIEmbeddings(model="text-embedding-3-small")
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=2500, chunk_overlap=300)
-
-# Initialize Chroma and ensure that we can store vector data
-try:
-    # Initialize Chroma vector store with persist_directory
-    if os.path.exists(persist_directory):
-        vectordb = Chroma(
-            persist_directory=persist_directory,
-            embedding_function=embedding
-        )
-    else:
-        os.makedirs(persist_directory, exist_ok=True)
-        vectordb = Chroma(
-            embedding_function=embedding,
-            persist_directory=persist_directory
-        )
-    print(f"Number of documents in the vector store: {len(vectordb.get()['documents'])}")
-
-except Exception as e:
-    print("Error initializing Chroma:", str(e))
-    raise
 
 
 def format_docs(docs):
@@ -110,10 +63,30 @@ def print_me(x):
 
 
 def get_retriever(contract_id):
-    num_docs = len(vectordb.get()["documents"])
-    if num_docs == 0:
-        return None  # or handle appropriately
-    return vectordb.as_retriever(search_kwargs={'filter': {'contract_id': contract_id}, "k": 35})
+    # Get the vector store path for this contract
+    if contract_id not in contract_vector_stores:
+        print(f"Error: No vector store found for contract ID: {contract_id}")
+        return None
+        
+    vector_store_path = contract_vector_stores[contract_id]
+    
+    # Initialize the vector store for this contract
+    try:
+        vectordb = Chroma(
+            persist_directory=vector_store_path,
+            embedding_function=embedding
+        )
+        
+        # Check if there are documents in the vector store
+        docs_info = vectordb.get()
+        if len(docs_info["documents"]) == 0:
+            print(f"Warning: No documents in vector store for contract ID: {contract_id}")
+            return None
+            
+        return vectordb.as_retriever(search_kwargs={"k": 35})
+    except Exception as e:
+        print(f"Error getting retriever for contract {contract_id}: {str(e)}")
+        return None
 
 
 # LLM and prompt
@@ -290,7 +263,7 @@ chain_summary = (
         "context": RunnableLambda(
             lambda inputs: format_docs(
                 get_retriever(inputs["contract_id"]).invoke(inputs["question"])
-            )
+            ) if get_retriever(inputs["contract_id"]) else "No documents found for this contract."
         ),
         "question": itemgetter("question"),
         "history": itemgetter("history"),
@@ -305,7 +278,7 @@ chain_chat = (
         "context": RunnableLambda(
             lambda inputs: format_docs(
                 get_retriever(inputs["contract_id"]).invoke(inputs["question"])
-            )
+            ) if get_retriever(inputs["contract_id"]) else "No documents found for this contract."
         ),
         "question": itemgetter("question"),
         "history": itemgetter("history"),
@@ -343,109 +316,138 @@ chain_with_history_chat = RunnableWithMessageHistory(
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
-        # Initialize Chroma vector store
-        embedding = OpenAIEmbeddings(model="text-embedding-3-small")
-        vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
-
-        # Clean up previous vector store if necessary
-        close_chroma(vectordb)  # Close the previous Chroma instance if open
-        delete_vector_store_with_retry(persist_directory)  # Delete the previous vector store directory
-
         # Check if file is provided
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
 
         file = request.files['file']
-        file.seek(0)  # Reset the file pointer
-
-        # Validate file type
+        
+        # Validate file
+        if not file.filename:
+            return jsonify({"error": "No file selected"}), 400
+            
         if not file.filename.lower().endswith('.pdf'):
             return jsonify({"error": "Only PDF files accepted"}), 400
-
-        # Process new file
-        contract_id = str(uuid.uuid4())  # Generate new contract ID
+        
+        # Generate a new contract ID and create unique vector store directory
+        contract_id = str(uuid.uuid4())
+        vector_store_path = os.path.join(VECTOR_STORE_BASE_DIR, contract_id)
+        os.makedirs(vector_store_path, exist_ok=True)
+        
+        # Store the path mapping
+        contract_vector_stores[contract_id] = vector_store_path
+        
+        # Create a temporary directory for processing
         temp_dir = os.path.join("temp_uploads", contract_id)
         os.makedirs(temp_dir, exist_ok=True)
+        
+        # Save the file
         temp_path = os.path.join(temp_dir, file.filename)
         file.save(temp_path)
-
-        # Load the PDF
-        loader = PyPDFLoader(temp_path)
-        documents = loader.load()
-
-        if not documents:
-            return jsonify({"error": "PDF text extraction failed"}), 400
-
-        # Split the documents into smaller chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2500, chunk_overlap=300)
-        texts = text_splitter.split_documents(documents)
         
-        # Add metadata to each document chunk
-        for text in texts:
-            text.metadata["contract_id"] = contract_id
-
-        # Add documents to Chroma
-        vectordb.add_documents(texts)
-        print(f"Added {len(texts)} documents to Chroma.")
-
-        # Clean up temporary directory
-        shutil.rmtree(temp_dir)
-
-        # Fetch the full summary using the updated model logic
-        summary = generate_full_summary(contract_id)  # This function should get the full contract context and generate the detailed summary.
-
-        return jsonify({"contract_id": contract_id, "summary": summary}), 200
-
+        # Load the PDF
+        try:
+            loader = PyPDFLoader(temp_path)
+            documents = loader.load()
+            
+            if not documents:
+                return jsonify({"error": "PDF text extraction failed"}), 400
+                
+            # Split the documents into smaller chunks
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=2500, chunk_overlap=300)
+            texts = text_splitter.split_documents(documents)
+            
+            # Add metadata to each document chunk
+            for text in texts:
+                text.metadata["contract_id"] = contract_id
+                
+            # Initialize a new vector store for this contract
+            vectordb = Chroma(
+                persist_directory=vector_store_path,
+                embedding_function=embedding
+            )
+            
+            # Add documents to Chroma
+            vectordb.add_documents(texts)
+            print(f"Added {len(texts)} documents to vector store at {vector_store_path}")
+            
+            # Clean up temporary directory
+            shutil.rmtree(temp_dir)
+            
+            # Generate full summary
+            summary = generate_full_summary(contract_id)
+            
+            return jsonify({"contract_id": contract_id, "summary": summary}), 200
+            
+        except Exception as e:
+            print(f"Error processing PDF: {str(e)}")
+            # Clean up on error
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            if os.path.exists(vector_store_path):
+                shutil.rmtree(vector_store_path)
+            if contract_id in contract_vector_stores:
+                del contract_vector_stores[contract_id]
+            return jsonify({"error": f"Error processing PDF: {str(e)}"}), 500
+            
     except Exception as e:
-        print(f"Error during file upload: {str(e)}")  # Log the full error
+        print(f"Error during file upload: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
 
 
-def get_retriever(contract_id):
-    # Initialize the embedding function and vectordb
-    embedding = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
-    
-    # Get the retriever using `as_retriever()`
-    retriever = vectordb.as_retriever(
-        search_kwargs={"filter": {"contract_id": contract_id}, "k": 35}
-    )
-    return retriever
-
-def format_docs(docs):
-    # Format the documents into a single string
-    return "\n\n".join([doc.page_content for doc in docs])
-
 def generate_full_summary(contract_id):
     try:
-        # Retrieve the context from the vector store using the retriever
-        retriever = get_retriever(contract_id)
+        # Check if the contract exists
+        if contract_id not in contract_vector_stores:
+            return "Contract not found."
+            
+        vector_store_path = contract_vector_stores[contract_id]
+        
+        # Initialize vector store for this contract
+        vectordb = Chroma(
+            persist_directory=vector_store_path,
+            embedding_function=embedding
+        )
+        
+        # Create a retriever for this contract
+        retriever = vectordb.as_retriever(search_kwargs={"k": 35})
         
         # Provide a placeholder query to fetch the relevant documents
         query = "Provide the full contract details to generate the summary."
-
-        # Retrieve the relevant documents using the query
+        
+        # Retrieve the relevant documents
         documents = retriever.get_relevant_documents(query)
         
         if not documents:
             return "No documents found for the given contract."
-        
-        # Format the documents to create the full summary
+            
+        # Format the documents to create the context
         context = format_docs(documents)
         
-        # Create a properly formatted prompt for the LLM
-        formatted_prompt = prompt_summary.format(
-            question="Generate a comprehensive summary of this contract",
-            context=context,
-            history=[]  # Pass an empty list instead of a string
+        # Get or create message history for this contract
+        if contract_id not in message_histories:
+            message_histories[contract_id] = ChatMessageHistory()
+            
+        # Create message placeholder for the history
+        history_messages = message_histories[contract_id].messages
+        
+        # Use the LLM to generate the summary
+        response = llm.invoke(
+            prompt_summary.format(
+                question="Generate a comprehensive summary of this contract",
+                context=context,
+                history=history_messages
+            )
         )
         
-        # Use the formatted prompt with the LLM
-        response = llm.invoke(formatted_prompt)
+        # Save the summary as the first AI message in the history
+        if contract_id in message_histories:
+            # Clear existing history and add new summary
+            message_histories[contract_id] = ChatMessageHistory()
+            message_histories[contract_id].add_ai_message(response.content)
         
-        # Extract the content from the response
         return response.content
-    
+        
     except Exception as e:
         print(f"Error generating summary: {str(e)}")
         return f"Error generating summary: {str(e)}"
@@ -459,54 +461,109 @@ def handle_chat():
         return jsonify({"error": "Missing 'question' or 'contract_id' in the request body."}), 400
 
     contract_id = data['contract_id']
-
-    # Initialize the embedding function and vectordb
-    embedding = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectordb = Chroma(embedding_function=embedding, persist_directory=persist_directory)
-
-    # Check if the vector store is empty
+    
+    # Check if the contract exists
+    if contract_id not in contract_vector_stores:
+        return jsonify({"error": f"Contract ID not found: {contract_id}"}), 404
+        
     try:
-        documents = vectordb.get()["documents"]
-        if len(documents) == 0:
-            return jsonify({"error": f"No documents found for contract ID: {contract_id}"}), 400
-    except Exception as e:
-        return jsonify({"error": f"Error accessing vector store: {str(e)}"}), 500
-
-    try:
-        # Initialize the message history for this contract if it doesn't exist
+        # Add the user message to history
         if contract_id not in message_histories:
             message_histories[contract_id] = ChatMessageHistory()
+            message_histories[contract_id].add_ai_message("How can I help you?")
         
+        # Add the user's question to history - THIS IS THE FIX
+        # Use add_user_message() instead of add_message("human", ...)
+        message_histories[contract_id].add_user_message(data['question'])
+        
+        # Process the chat using the chain
         response = chain_with_history_chat.invoke(
             {"question": data['question'], "contract_id": contract_id},
             config={"configurable": {"session_id": contract_id}}
         )
+        
+        # Add the response to history - THIS IS ALSO FIXED
+        # Use add_ai_message() instead of add_message("ai", ...)
+        message_histories[contract_id].add_ai_message(response)
+        
         return jsonify({"answer": response}), 200
+        
     except Exception as e:
-        print(f"Error occurred: {e}")  # Log the full error to the console for debugging
+        print(f"Error occurred during chat: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 
 # List all contracts
 @app.route('/contracts', methods=['GET'])
 def get_contracts():
     """Endpoint to list all uploaded contracts"""
-    if not message_histories:
+    if not message_histories or not contract_vector_stores:
         return jsonify({"message": "No contracts found. Please upload documents to start."}), 404
 
     contracts_list = []
     
     for contract_id, history in message_histories.items():
-        # Get the most recent AI message as the summary
-        ai_messages = [msg.content for msg in history.messages if msg.type == "ai"]
-        summary = ai_messages[-1] if ai_messages else "No summary available"
-        
-        contracts_list.append({
-            "contract_id": contract_id,
-            "summary": summary
-        })
+        if contract_id in contract_vector_stores:  # Only include contracts that have vector stores
+            # Get the most recent AI message as the summary
+            ai_messages = [msg.content for msg in history.messages if msg.type == "ai"]
+            summary = ai_messages[-1] if ai_messages else "No summary available"
+            
+            contracts_list.append({
+                "contract_id": contract_id,
+                "summary": summary
+            })
 
     return jsonify(contracts_list), 200
+
+
+# Endpoint to check contract existence
+@app.route('/contract/<contract_id>', methods=['GET'])
+def check_contract(contract_id):
+    """Check if a specific contract exists"""
+    if contract_id in contract_vector_stores:
+        return jsonify({"exists": True}), 200
+    else:
+        return jsonify({"exists": False}), 404
+
+
+# Cleanup function to remove old sessions
+def cleanup_old_sessions():
+    """Remove sessions older than 24 hours"""
+    while True:
+        try:
+            current_time = datetime.now()
+            contracts_to_remove = []
+            
+            for contract_id, creation_time in session_creation_times.items():
+                if (current_time - creation_time) > timedelta(hours=24):
+                    contracts_to_remove.append(contract_id)
+                    
+            for contract_id in contracts_to_remove:
+                # Remove session data
+                if contract_id in message_histories:
+                    del message_histories[contract_id]
+                if contract_id in session_creation_times:
+                    del session_creation_times[contract_id]
+                    
+                # Remove vector store
+                if contract_id in contract_vector_stores:
+                    vector_store_path = contract_vector_stores[contract_id]
+                    if os.path.exists(vector_store_path):
+                        shutil.rmtree(vector_store_path)
+                    del contract_vector_stores[contract_id]
+                    
+            # Sleep for an hour before next cleanup
+            time.sleep(3600)
+            
+        except Exception as e:
+            print(f"Error in cleanup task: {str(e)}")
+            time.sleep(3600)  # Still sleep on error
+
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_old_sessions, daemon=True)
+cleanup_thread.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
