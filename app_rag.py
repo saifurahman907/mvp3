@@ -263,6 +263,7 @@ def load_prompt_from_file(filename):
             - Keep explanations brief and in layman's terms.
             - Provide **reasonable context** for each answer.
             - Use **bold** markdown for key dates, values, and timeframes (e.g., **35 days**, **March 2022**, **$10,000**).
+            - All responses should be clear and natural for non-technical construction professionals, making it easy for them to understand.
 
             Please address the key contract areas focusing on:
             1. DOCUMENTS
@@ -303,6 +304,7 @@ def load_prompt_from_file(filename):
         else:
             logger.error(f"Prompt file not found: {filename}")
             return ""
+
 
 
 # Create prompt directory if it doesn't exist
