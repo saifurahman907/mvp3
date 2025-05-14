@@ -899,7 +899,7 @@ def get_retriever(contract_id):
 
 # LLM with timeout configuration
 llm = ChatOpenAI(
-    model="gpt-4o", 
+    model="gpt-4o-mini", 
     api_key=api_key,
     request_timeout=90,
     max_retries=3
