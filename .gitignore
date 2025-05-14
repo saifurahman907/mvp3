@@ -52,3 +52,24 @@ dist/
 
 # Windows thumbnail cache
 Thumbs.db
+
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtual environment
+myenv/
+
+# Environment variables file
+.env
+
+# Temporary uploads
+temp_uploads/
+
+# Vector store data
+vector_stores/
+
+# Logs
+app.log
+
