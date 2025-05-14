@@ -905,7 +905,6 @@ llm = ChatOpenAI(
     max_retries=3
 )
 
-# Load prompts from template files
 def load_prompt_from_file(filename):
     """Load prompt template from file"""
     try:
@@ -921,15 +920,17 @@ def load_prompt_from_file(filename):
             Context:
             {context}
 
-            Role: You are a contract law expert specializing in UK construction contracts. Your audience is made up of non-technical construction professionals who are not experts in contracts.
+            Role: You are a contract law expert specializing in UK construction contracts. Your audience is non-technical construction professionals who are not experts in contracts.
 
             Task: Using the provided context, produce a detailed summary of the contract. Write in clear, simple, everyday language, and explain any technical terms so that a layperson can easily understand.
 
             FORMAT REQUIREMENTS:
-            - Use CAPITALIZED HEADINGS for main sections
-            - Present answers as bullet points with reasonable context
-            - Keep explanations brief and in layman's terms
-            - Bold key dates, values, and timeframes using **bold** markdown
+            - Use CAPITALIZED HEADINGS for main sections (e.g., DOCUMENTS, PAYMENTS, RETENTION)
+            - For each section, include an **Indented Subheading**: the prompt question from the left-hand column of the prompt table.
+            - Provide **Bullet points** with answers extracted from the contract to the prompt question.
+            - Keep explanations brief and in layman's terms.
+            - Provide **reasonable context** for each answer.
+            - Use **bold** markdown for key dates, values, and timeframes.
 
             Please address the key contract areas focusing on:
             1. DOCUMENTS
@@ -954,14 +955,15 @@ def load_prompt_from_file(filename):
             {context}
             
             FORMAT REQUIREMENTS:
-            - Use CAPITALIZED HEADINGS for main sections
-            - Present answers as bullet points with reasonable context
-            - Use natural language and layman's terms
-            - Keep explanations brief and practical
+            - Use CAPITALIZED HEADINGS for main sections (e.g., DOCUMENTS, PAYMENTS, RETENTION).
+            - For each section, include an **Indented Subheading**: the prompt question from the left-hand column of the prompt table.
+            - Provide **Bullet points** with answers extracted from the contract to the prompt question.
+            - Use **natural language** and layman's terms.
+            - Keep explanations brief and practical.
             
             When information is not found in the contract:
             - State simply: "This contract doesn't specify..."
-            - Suggest what the user might want to clarify
+            - Suggest what the user might want to clarify.
             
             Question: {question}
             """
