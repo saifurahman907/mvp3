@@ -276,6 +276,11 @@ def load_prompt_from_file(filename):
 
             Questions:
             {question}
+
+            - Ensure that each section starts with the heading in **CAPITALIZED** format.
+            - Ensure that each **subheading (question)** is clearly indented.
+            - Each answer should be **bullet-pointed** for easy readability.
+            - For important terms like **Contract Sum**, **Employer**, etc., **bold** them for clarity.
             """
         elif filename == "prompts/chat_prompt.txt":
             return """
@@ -300,6 +305,11 @@ def load_prompt_from_file(filename):
             - Suggest what the user might want to clarify.
             
             Question: {question}
+
+            - Ensure that each section starts with the heading in **CAPITALIZED** format.
+            - Ensure that each **subheading (question)** is clearly indented.
+            - Each answer should be **bullet-pointed** for easy readability.
+            - For important terms like **Contract Sum**, **Employer**, etc., **bold** them for clarity.
             """
         else:
             logger.error(f"Prompt file not found: {filename}")
