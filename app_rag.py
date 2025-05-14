@@ -280,7 +280,8 @@ def load_prompt_from_file(filename):
             - Ensure that each section starts with the heading in **CAPITALIZED** format.
             - Ensure that each **subheading (question)** is clearly indented.
             - Each answer should be **bullet-pointed** for easy readability.
-            - For important terms like **Contract Sum**, **Employer**, etc., **bold** them for clarity.
+            - For important terms like **Contract Sum**, **Employer**, **Contractor**, etc., **bold** them for clarity.
+            - For dates, timeframes, and monetary values (e.g., **£10,000**, **March 2022**, **35 days**), use **bold** formatting.
             """
         elif filename == "prompts/chat_prompt.txt":
             return """
@@ -309,11 +310,13 @@ def load_prompt_from_file(filename):
             - Ensure that each section starts with the heading in **CAPITALIZED** format.
             - Ensure that each **subheading (question)** is clearly indented.
             - Each answer should be **bullet-pointed** for easy readability.
-            - For important terms like **Contract Sum**, **Employer**, etc., **bold** them for clarity.
+            - For important terms like **Contract Sum**, **Employer**, **Contractor**, etc., **bold** them for clarity.
+            - For dates, timeframes, and monetary values (e.g., **£10,000**, **March 2022**, **35 days**), use **bold** formatting.
             """
         else:
             logger.error(f"Prompt file not found: {filename}")
             return ""
+
 
 
 
