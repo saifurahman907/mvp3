@@ -666,15 +666,6 @@
 
 
 
-"""
-Optimized Flask Application for Contract Analysis
-- Improved thread safety with proper locks
-- Enhanced security configurations
-- Better resource management
-- Performance optimizations
-- Proper logging instead of print statements
-"""
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -736,10 +727,26 @@ if not api_key:
 else:
     logger.info("API key loaded successfully")
 
-# Flask App Setup with more secure CORS configuration
+# Flask App Setup with properly configured CORS
 app = Flask(__name__)
-# Configure CORS with specific origins
-CORS(app, resources={r"/*": {"origins": os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")}})
+
+# IMPROVED CORS CONFIGURATION
+# Default to all origins if not specified - better for development
+DEFAULT_ORIGINS = "*"
+allowed_origins = os.getenv("ALLOWED_ORIGINS", DEFAULT_ORIGINS)
+if allowed_origins == "*":
+    # Enable CORS for all origins with support for credentials
+    CORS(app, supports_credentials=True)
+    logger.info("CORS enabled for all origins")
+else:
+    # Enable CORS for specific origins
+    origins = allowed_origins.split(",")
+    CORS(app, 
+         resources={r"/*": {"origins": origins}},
+         supports_credentials=True,
+         methods=["GET", "POST", "OPTIONS"],
+         allow_headers=["Content-Type", "Authorization"])
+    logger.info(f"CORS enabled for specific origins: {origins}")
 
 # Configuration parameters that can be set from environment
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
@@ -1167,9 +1174,40 @@ def process_pdf_in_background(contract_id, file_path):
         except Exception as cleanup_error:
             logger.error(f"Error cleaning up after failed processing: {str(cleanup_error)}")
 
+# Define CORS preflight handlers for all routes
+@app.route('/upload', methods=['OPTIONS'])
+def upload_preflight():
+    """Handle preflight CORS requests for upload endpoint"""
+    response = jsonify({'message': 'Preflight request successful'})
+    return response
+
+@app.route('/chat', methods=['OPTIONS'])
+def chat_preflight():
+    """Handle preflight CORS requests for chat endpoint"""
+    response = jsonify({'message': 'Preflight request successful'})
+    return response
+
+@app.route('/contracts', methods=['OPTIONS'])
+def contracts_preflight():
+    """Handle preflight CORS requests for contracts endpoint"""
+    response = jsonify({'message': 'Preflight request successful'})
+    return response
+
+@app.route('/contract/<contract_id>', methods=['OPTIONS'])
+def contract_preflight(contract_id):
+    """Handle preflight CORS requests for contract endpoint"""
+    response = jsonify({'message': 'Preflight request successful'})
+    return response
+
+@app.route('/contract/<contract_id>/summary', methods=['OPTIONS'])
+def summary_preflight(contract_id):
+    """Handle preflight CORS requests for summary endpoint"""
+    response = jsonify({'message': 'Preflight request successful'})
+    return response
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Upload endpoint for PDF contracts"""
+    """Upload endpoint for PDF contracts with direct summary response"""
     try:
         # Check if file is provided
         if 'file' not in request.files:
@@ -1217,13 +1255,87 @@ def upload_file():
         
         # Process in background
         processing_status[contract_id] = "started"
-        executor.submit(process_pdf_in_background, contract_id, temp_path)
         
-        return jsonify({
-            "contract_id": contract_id, 
-            "message": "Document processing started. Check /contract/{contract_id} for status.",
-            "status": "processing"
-        }), 202
+        # Process the document and get the summary synchronously
+        # Instead of submitting to executor, we'll process directly
+        try:
+            # Load the PDF
+            loader = PyPDFLoader(temp_path)
+            documents = loader.load()
+            
+            if not documents:
+                processing_status[contract_id] = "failed"
+                logger.error(f"No content extracted from PDF for contract {contract_id}")
+                return jsonify({
+                    "contract_id": contract_id,
+                    "status": "failed",
+                    "error": "Failed to extract content from PDF"
+                }), 500
+                
+            # Split the documents into smaller chunks
+            chunks = text_splitter.split_documents(documents)
+            
+            # Add metadata to each document chunk
+            for chunk in chunks:
+                chunk.metadata["contract_id"] = contract_id
+                
+            # Process chunks
+            success = process_pdf_chunks(contract_id, chunks)
+            if not success:
+                processing_status[contract_id] = "failed"
+                return jsonify({
+                    "contract_id": contract_id,
+                    "status": "failed",
+                    "error": "Failed to process document chunks"
+                }), 500
+            
+            # Generate summary
+            summary = generate_full_summary(contract_id)
+            processing_status[contract_id] = "completed"
+            
+            # Store summary in message history
+            if contract_id in message_histories:
+                message_histories[contract_id] = ChatMessageHistory()
+                message_histories[contract_id].add_ai_message(summary)
+                
+            # Clean up temporary file
+            try:
+                if Path(temp_path).exists():
+                    Path(temp_path).unlink()
+                    # Also clean up the parent temp directory if it's empty
+                    temp_dir = Path(temp_path).parent
+                    if temp_dir.exists() and not any(temp_dir.iterdir()):
+                        temp_dir.rmdir()
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file: {str(e)}")
+                
+            # Return the full summary with the response
+            return jsonify({
+                "contract_id": contract_id,
+                "status": "completed",
+                "summary": summary
+            }), 200
+                
+        except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
+            processing_status[contract_id] = "failed"
+            
+            # Clean up on error
+            try:
+                if Path(vector_store_path).exists():
+                    shutil.rmtree(vector_store_path)
+                if contract_id in contract_vector_stores:
+                    del contract_vector_stores[contract_id]
+                if contract_id in chroma_cache:
+                    del chroma_cache[contract_id]
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up after failed processing: {str(cleanup_error)}")
+                
+            return jsonify({
+                "contract_id": contract_id,
+                "status": "failed",
+                "error": f"Error processing document: {str(e)}"
+            }), 500
             
     except Exception as e:
         logger.error(f"Error during file upload: {str(e)}")
@@ -1415,8 +1527,6 @@ def cleanup_old_sessions():
                     # Remove session data
                     if contract_id in message_histories:
                         del message_histories[contract_id]
-                    if contract_id in session_creation_times:
-                        del session_creation_times[contract_id]
                     if contract_id in processing_status:
                         del processing_status[contract_id]
                 except Exception as e:
@@ -1439,7 +1549,7 @@ if __name__ == '__main__':
     logger.info(f"Using vector store directory: {VECTOR_STORE_BASE_DIR}")
     logger.info(f"Using temporary upload directory: {TEMP_UPLOAD_DIR}")
     logger.info(f"Session timeout: {SESSION_TIMEOUT_HOURS} hours")
-    
+
     # Use production WSGI server if available
     try:
         from waitress import serve
