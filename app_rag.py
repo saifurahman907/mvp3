@@ -635,7 +635,7 @@ def summary_preflight(contract_id):
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Upload endpoint for PDF contracts with direct summary response"""
+    """Upload endpoint for PDF contracts with async processing"""
     try:
         # Check if file is provided
         if 'file' not in request.files:
@@ -681,89 +681,19 @@ def upload_file():
         temp_path = str(temp_dir / safe_filename)
         file.save(temp_path)
         
-        # Process in background
+        # Set initial processing status
         processing_status[contract_id] = "started"
         
-        # Process the document and get the summary synchronously
-        # Instead of submitting to executor, we'll process directly
-        try:
-            # Load the PDF
-            loader = PyPDFLoader(temp_path)
-            documents = loader.load()
-            
-            if not documents:
-                processing_status[contract_id] = "failed"
-                logger.error(f"No content extracted from PDF for contract {contract_id}")
-                return jsonify({
-                    "contract_id": contract_id,
-                    "status": "failed",
-                    "error": "Failed to extract content from PDF"
-                }), 500
-                
-            # Split the documents into smaller chunks
-            chunks = text_splitter.split_documents(documents)
-            
-            # Add metadata to each document chunk
-            for chunk in chunks:
-                chunk.metadata["contract_id"] = contract_id
-                
-            # Process chunks
-            success = process_pdf_chunks(contract_id, chunks)
-            if not success:
-                processing_status[contract_id] = "failed"
-                return jsonify({
-                    "contract_id": contract_id,
-                    "status": "failed",
-                    "error": "Failed to process document chunks"
-                }), 500
-            
-            # Generate summary
-            summary = generate_full_summary(contract_id)
-            processing_status[contract_id] = "completed"
-            
-            # Store summary in message history
-            if contract_id in message_histories:
-                message_histories[contract_id] = ChatMessageHistory()
-                message_histories[contract_id].add_ai_message(summary)
-                
-            # Clean up temporary file
-            try:
-                if Path(temp_path).exists():
-                    Path(temp_path).unlink()
-                    # Also clean up the parent temp directory if it's empty
-                    temp_dir = Path(temp_path).parent
-                    if temp_dir.exists() and not any(temp_dir.iterdir()):
-                        temp_dir.rmdir()
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary file: {str(e)}")
-                
-            # Return the full summary with the response
-            return jsonify({
-                "contract_id": contract_id,
-                "status": "completed",
-                "summary": summary
-            }), 200
-                
-        except Exception as e:
-            logger.error(f"Error processing document: {str(e)}")
-            processing_status[contract_id] = "failed"
-            
-            # Clean up on error
-            try:
-                if Path(vector_store_path).exists():
-                    shutil.rmtree(vector_store_path)
-                if contract_id in contract_vector_stores:
-                    del contract_vector_stores[contract_id]
-                if contract_id in chroma_cache:
-                    del chroma_cache[contract_id]
-            except Exception as cleanup_error:
-                logger.error(f"Error cleaning up after failed processing: {str(cleanup_error)}")
-                
-            return jsonify({
-                "contract_id": contract_id,
-                "status": "failed",
-                "error": f"Error processing document: {str(e)}"
-            }), 500
+        # Submit the processing task to the background executor
+        # This allows the API to return immediately without waiting for processing
+        executor.submit(process_pdf_in_background, contract_id, temp_path)
+        
+        # Return immediately with the contract ID and status
+        return jsonify({
+            "contract_id": contract_id,
+            "status": "processing",
+            "message": "Document uploaded and processing started. Check status using the /contract/{contract_id} endpoint."
+        }), 202
             
     except Exception as e:
         logger.error(f"Error during file upload: {str(e)}")
