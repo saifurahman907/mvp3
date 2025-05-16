@@ -37,7 +37,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 # Document processing 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
+import pdfplumber
 from langchain_community.chat_message_histories import ChatMessageHistory
 
 # Vector stores
@@ -541,7 +541,7 @@ def process_pdf_in_background(contract_id, file_path):
         processing_status[contract_id] = "processing"
         
         # Load the PDF
-        loader = PyPDFLoader(file_path)
+        loader = pdfplumber(file_path)
         documents = loader.load()
         
         if not documents:
@@ -701,7 +701,7 @@ def upload_file():
             
             try:
                 # Load the PDF
-                loader = PyPDFLoader(temp_path)
+                loader = pdfplumber(temp_path)
                 documents = loader.load()
                 
                 if not documents:
