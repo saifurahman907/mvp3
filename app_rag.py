@@ -627,29 +627,21 @@ def process_pdf_in_background(contract_id, file_path):
             # Update status before generating summary
             processing_status[contract_id] = "generating_summary"
             
-            # Generate the summary with timeout handling
-            summary = None
+            # Try to generate summary with better error handling
             try:
-                # Use a thread with timeout for summary generation
-                summary_thread = threading.Thread(target=lambda: generate_full_summary(contract_id))
-                summary_thread.start()
-                summary_thread.join(timeout=120)  # 2-minute timeout
+                logger.info(f"Starting summary generation for contract {contract_id}")
+                summary = generate_full_summary(contract_id)
                 
-                if summary_thread.is_alive():
-                    logger.warning(f"Summary generation timed out for contract {contract_id}")
-                    # Let the thread continue but don't wait for it
-                    processing_status[contract_id] = "completed_without_summary"
+                # Check if summary was generated successfully
+                if summary and len(summary) > 0:
+                    processing_status[contract_id] = "completed"
+                    logger.info(f"Summary generation completed for contract {contract_id}")
                 else:
-                    # Get the message from history
-                    if contract_id in message_histories:
-                        ai_messages = [msg.content for msg in message_histories[contract_id].messages if msg.type == "ai"]
-                        if ai_messages:
-                            summary = ai_messages[-1]
-                            processing_status[contract_id] = "completed"
+                    logger.warning(f"Summary generation produced empty result for contract {contract_id}")
+                    processing_status[contract_id] = "completed_without_summary"
             except Exception as summary_error:
                 logger.error(f"Error generating summary: {str(summary_error)}")
                 processing_status[contract_id] = "completed_without_summary"
-                
         except Exception as e:
             logger.error(f"Unhandled error in summary generation: {str(e)}")
             processing_status[contract_id] = "completed_without_summary"
@@ -681,7 +673,7 @@ def process_pdf_in_background(contract_id, file_path):
                 del chroma_cache[contract_id]
         except Exception as cleanup_error:
             logger.error(f"Error cleaning up after failed processing: {str(cleanup_error)}")
-
+            
 # Define CORS preflight handlers for all routes
 @app.route('/upload', methods=['OPTIONS'])
 def upload_preflight():
