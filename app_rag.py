@@ -89,8 +89,8 @@ HOST = os.getenv("HOST", "127.0.0.1")  # Default to localhost for security
 PORT = int(os.getenv("PORT", "5000"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
-RETRIEVER_K = int(os.getenv("RETRIEVER_K", "20"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
+RETRIEVER_K = int(os.getenv("RETRIEVER_K", "10"))
 
 # Base directory for vector stores - using Path for better path handling
 VECTOR_STORE_BASE_DIR = Path("vector_stores")
@@ -234,7 +234,7 @@ def get_retriever(contract_id):
 llm = ChatOpenAI(
     model="gpt-4o", 
     api_key=api_key,
-    request_timeout=90,
+    request_timeout=60,
     max_retries=3
 )
 
@@ -530,8 +530,9 @@ def generate_full_summary(contract_id):
         logger.error(f"Error generating summary: {str(e)}")
         return f"Error generating summary: {str(e)}"
 
+
 def process_pdf_in_background(contract_id, file_path):
-    """Background processing function for PDFs"""
+    """Background processing function for PDFs with improved performance and error handling"""
     try:
         if contract_id not in contract_vector_stores:
             logger.error(f"Contract ID not found: {contract_id}")
@@ -541,65 +542,136 @@ def process_pdf_in_background(contract_id, file_path):
         vector_store_path = contract_vector_stores[contract_id]
         processing_status[contract_id] = "processing"
         
-        # Load the PDF using pdfplumber correctly
-        documents = []
-        with pdfplumber.open(file_path) as pdf:  # FIXED: Using file_path instead of temp_path
-            for i, page in enumerate(pdf.pages):
-                text = page.extract_text()
-                if text:
-                    documents.append(Document(
-                        page_content=text,
-                        metadata={"source": file_path, "page": i}  # FIXED: Using file_path instead of temp_path
-                    ))
-        
-        if not documents:
+        try:
+            # Load the PDF page by page to reduce memory usage
+            documents = []
+            page_count = 0
+            
+            with pdfplumber.open(file_path) as pdf:
+                total_pages = len(pdf.pages)
+                logger.info(f"Processing PDF with {total_pages} pages for contract {contract_id}")
+                
+                # Process in batches of 10 pages to avoid memory issues
+                batch_size = 10
+                for i in range(0, total_pages, batch_size):
+                    batch_end = min(i + batch_size, total_pages)
+                    
+                    for j in range(i, batch_end):
+                        try:
+                            page = pdf.pages[j]
+                            text = page.extract_text()
+                            if text and text.strip():  # Only add if we got meaningful text
+                                documents.append(Document(
+                                    page_content=text,
+                                    metadata={"source": file_path, "page": j}
+                                ))
+                                page_count += 1
+                            else:
+                                logger.warning(f"Empty text extracted from page {j} for contract {contract_id}")
+                        except Exception as page_error:
+                            logger.error(f"Error extracting text from page {j}: {str(page_error)}")
+                            # Continue with other pages even if one fails
+            
+            logger.info(f"Successfully extracted text from {page_count} pages for contract {contract_id}")
+            
+            if not documents:
+                processing_status[contract_id] = "failed"
+                logger.error(f"No content extracted from PDF for contract {contract_id}")
+                return
+        except Exception as pdf_error:
             processing_status[contract_id] = "failed"
-            logger.error(f"No content extracted from PDF for contract {contract_id}")
+            logger.error(f"Error reading PDF for contract {contract_id}: {str(pdf_error)}")
             return
             
         # Split the documents into smaller chunks
-        chunks = text_splitter.split_documents(documents)
-        
-        # Add metadata to each document chunk
-        for chunk in chunks:
-            chunk.metadata["contract_id"] = contract_id
+        try:
+            chunks = text_splitter.split_documents(documents)
+            logger.info(f"Split {len(documents)} documents into {len(chunks)} chunks for contract {contract_id}")
             
-        # Process chunks
-        success = process_pdf_chunks(contract_id, chunks)
-        if not success:
+            # Add metadata to each document chunk
+            for chunk in chunks:
+                chunk.metadata["contract_id"] = contract_id
+        except Exception as split_error:
             processing_status[contract_id] = "failed"
+            logger.error(f"Error splitting documents for contract {contract_id}: {str(split_error)}")
+            return
+        
+        # Process chunks in smaller batches
+        try:
+            # Process in batches to avoid memory issues
+            with get_chroma_db(contract_id) as vectordb:
+                if not vectordb:
+                    logger.error(f"Failed to get vector DB for {contract_id}")
+                    processing_status[contract_id] = "failed"
+                    return
+                    
+                # Process in smaller batches for better memory management
+                batch_size = min(50, BATCH_SIZE)  # Limit batch size
+                for i in range(0, len(chunks), batch_size):
+                    batch = chunks[i:i+batch_size]
+                    
+                    # Add documents to Chroma
+                    try:
+                        vectordb.add_documents(batch)
+                        logger.info(f"Added chunk batch {i//batch_size + 1} of {(len(chunks)-1)//batch_size + 1} to vector store")
+                    except Exception as batch_error:
+                        logger.error(f"Error adding batch {i//batch_size + 1} to vector store: {str(batch_error)}")
+                        # Continue with other batches
+        except Exception as db_error:
+            processing_status[contract_id] = "failed"
+            logger.error(f"Error with vector database for {contract_id}: {str(db_error)}")
             return
         
         # Generate summary in background
         try:
-            summary = generate_full_summary(contract_id)
-            processing_status[contract_id] = "completed"
+            # Update status before generating summary
+            processing_status[contract_id] = "generating_summary"
             
-            # Store summary in message history
-            if contract_id in message_histories:
-                message_histories[contract_id] = ChatMessageHistory()
-                message_histories[contract_id].add_ai_message(summary)
+            # Generate the summary with timeout handling
+            summary = None
+            try:
+                # Use a thread with timeout for summary generation
+                summary_thread = threading.Thread(target=lambda: generate_full_summary(contract_id))
+                summary_thread.start()
+                summary_thread.join(timeout=120)  # 2-minute timeout
+                
+                if summary_thread.is_alive():
+                    logger.warning(f"Summary generation timed out for contract {contract_id}")
+                    # Let the thread continue but don't wait for it
+                    processing_status[contract_id] = "completed_without_summary"
+                else:
+                    # Get the message from history
+                    if contract_id in message_histories:
+                        ai_messages = [msg.content for msg in message_histories[contract_id].messages if msg.type == "ai"]
+                        if ai_messages:
+                            summary = ai_messages[-1]
+                            processing_status[contract_id] = "completed"
+            except Exception as summary_error:
+                logger.error(f"Error generating summary: {str(summary_error)}")
+                processing_status[contract_id] = "completed_without_summary"
                 
         except Exception as e:
-            logger.error(f"Error generating summary: {str(e)}")
-            processing_status[contract_id] = "summary_failed"
+            logger.error(f"Unhandled error in summary generation: {str(e)}")
+            processing_status[contract_id] = "completed_without_summary"
             
-        # Clean up temporary file
-        try:
-            if Path(file_path).exists():
-                Path(file_path).unlink()
-                # Also clean up the parent temp directory if it's empty
-                temp_dir = Path(file_path).parent
-                if temp_dir.exists() and not any(temp_dir.iterdir()):
-                    temp_dir.rmdir()
-        except Exception as e:
-            logger.warning(f"Failed to clean up temporary file: {str(e)}")
+        # Clean up temporary file regardless of success/failure
+        finally:
+            try:
+                if Path(file_path).exists():
+                    Path(file_path).unlink()
+                    # Also clean up the parent temp directory if it's empty
+                    temp_dir = Path(file_path).parent
+                    if temp_dir.exists() and not any(temp_dir.iterdir()):
+                        temp_dir.rmdir()
+                        logger.info(f"Cleaned up temporary directory for contract {contract_id}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file: {str(e)}")
             
     except Exception as e:
         processing_status[contract_id] = "failed"
         logger.error(f"Error processing PDF in background: {str(e)}")
         
-        # Clean up on error
+        # Clean up on critical error
         try:
             if Path(vector_store_path).exists():
                 shutil.rmtree(vector_store_path)
@@ -643,7 +715,7 @@ def summary_preflight(contract_id):
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Upload endpoint for PDF contracts with optimized processing"""
+    """Upload endpoint for PDF contracts with improved performance and error handling"""
     try:
         # Check if file is provided
         if 'file' not in request.files:
@@ -658,7 +730,7 @@ def upload_file():
         if not file.filename.lower().endswith('.pdf'):
             return jsonify({"error": "Only PDF files accepted"}), 400
             
-        # Check file size
+        # Check file size - fail fast
         file_size_mb = 0
         file.seek(0, os.SEEK_END)
         file_size_mb = file.tell() / (1024 * 1024)
@@ -689,109 +761,16 @@ def upload_file():
         temp_path = str(temp_dir / safe_filename)
         file.save(temp_path)
         
-        # Check for async parameter - default to synchronous for backward compatibility
-        process_async = request.args.get('async', 'false').lower() == 'true'
+        # Always process asynchronously to avoid request timeouts
+        processing_status[contract_id] = "started"
+        executor.submit(process_pdf_in_background, contract_id, temp_path)
         
-        if process_async:
-            # Asynchronous processing
-            processing_status[contract_id] = "started"
-            executor.submit(process_pdf_in_background, contract_id, temp_path)
-            
-            # Return immediately with the contract ID and status
-            return jsonify({
-                "contract_id": contract_id,
-                "status": "processing",
-                "message": "Document uploaded and processing started. Check status using the /contract/{contract_id} endpoint."
-            }), 202
-        else:
-            # Synchronous processing with summary (original behavior)
-            processing_status[contract_id] = "started"
-            
-            try:
-                # Load the PDF using pdfplumber correctly
-                documents = []
-                with pdfplumber.open(temp_path) as pdf:
-                    for i, page in enumerate(pdf.pages):
-                        text = page.extract_text()
-                        if text:
-                            documents.append(Document(
-                                page_content=text,
-                                metadata={"source": temp_path, "page": i}
-                            ))
-                
-                if not documents:
-                    processing_status[contract_id] = "failed"
-                    logger.error(f"No content extracted from PDF for contract {contract_id}")
-                    return jsonify({
-                        "contract_id": contract_id,
-                        "status": "failed",
-                        "error": "Failed to extract content from PDF"
-                    }), 500
-                    
-                # Split the documents into smaller chunks
-                chunks = text_splitter.split_documents(documents)
-                
-                # Add metadata to each document chunk
-                for chunk in chunks:
-                    chunk.metadata["contract_id"] = contract_id
-                    
-                # Process chunks
-                success = process_pdf_chunks(contract_id, chunks)
-                if not success:
-                    processing_status[contract_id] = "failed"
-                    return jsonify({
-                        "contract_id": contract_id,
-                        "status": "failed",
-                        "error": "Failed to process document chunks"
-                    }), 500
-                
-                # Generate summary
-                summary = generate_full_summary(contract_id)
-                processing_status[contract_id] = "completed"
-                
-                # Store summary in message history
-                if contract_id in message_histories:
-                    message_histories[contract_id] = ChatMessageHistory()
-                    message_histories[contract_id].add_ai_message(summary)
-                    
-                # Clean up temporary file
-                try:
-                    if Path(temp_path).exists():
-                        Path(temp_path).unlink()
-                        # Also clean up the parent temp directory if it's empty
-                        temp_dir = Path(temp_path).parent
-                        if temp_dir.exists() and not any(temp_dir.iterdir()):
-                            temp_dir.rmdir()
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temporary file: {str(e)}")
-                    
-                # Return the full summary with the response
-                return jsonify({
-                    "contract_id": contract_id,
-                    "status": "completed",
-                    "summary": summary
-                }), 200
-                    
-            except Exception as e:
-                logger.error(f"Error processing document: {str(e)}")
-                processing_status[contract_id] = "failed"
-                
-                # Clean up on error
-                try:
-                    if Path(vector_store_path).exists():
-                        shutil.rmtree(vector_store_path)
-                    if contract_id in contract_vector_stores:
-                        del contract_vector_stores[contract_id]
-                    if contract_id in chroma_cache:
-                        del chroma_cache[contract_id]
-                except Exception as cleanup_error:
-                    logger.error(f"Error cleaning up after failed processing: {str(cleanup_error)}")
-                    
-                return jsonify({
-                    "contract_id": contract_id,
-                    "status": "failed",
-                    "error": f"Error processing document: {str(e)}"
-                }), 500
+        # Return immediately with the contract ID and status
+        return jsonify({
+            "contract_id": contract_id,
+            "status": "processing",
+            "message": "Document uploaded and processing started. Check status using the /contract/{contract_id} endpoint."
+        }), 202
             
     except Exception as e:
         logger.error(f"Error during file upload: {str(e)}")
