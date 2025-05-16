@@ -4,7 +4,7 @@
 *.pyd
 __pycache__/
 *.so
-
+temp_uploads/
 # Virtual Environment
 .venv/
 env/

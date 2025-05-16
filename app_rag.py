@@ -87,8 +87,8 @@ SESSION_TIMEOUT_HOURS = int(os.getenv("SESSION_TIMEOUT_HOURS", "24"))
 HOST = os.getenv("HOST", "127.0.0.1")  # Default to localhost for security
 PORT = int(os.getenv("PORT", "5000"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
 RETRIEVER_K = int(os.getenv("RETRIEVER_K", "20"))
 
 # Base directory for vector stores - using Path for better path handling
