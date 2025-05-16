@@ -38,6 +38,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 # Document processing 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import pdfplumber
+from langchain_core.documents import Document
 from langchain_community.chat_message_histories import ChatMessageHistory
 
 # Vector stores
@@ -540,9 +541,16 @@ def process_pdf_in_background(contract_id, file_path):
         vector_store_path = contract_vector_stores[contract_id]
         processing_status[contract_id] = "processing"
         
-        # Load the PDF
-        loader = pdfplumber(file_path)
-        documents = loader.load()
+        # Load the PDF using pdfplumber correctly
+        documents = []
+        with pdfplumber.open(file_path) as pdf:  # FIXED: Using file_path instead of temp_path
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if text:
+                    documents.append(Document(
+                        page_content=text,
+                        metadata={"source": file_path, "page": i}  # FIXED: Using file_path instead of temp_path
+                    ))
         
         if not documents:
             processing_status[contract_id] = "failed"
@@ -700,9 +708,16 @@ def upload_file():
             processing_status[contract_id] = "started"
             
             try:
-                # Load the PDF
-                loader = pdfplumber(temp_path)
-                documents = loader.load()
+                # Load the PDF using pdfplumber correctly
+                documents = []
+                with pdfplumber.open(temp_path) as pdf:
+                    for i, page in enumerate(pdf.pages):
+                        text = page.extract_text()
+                        if text:
+                            documents.append(Document(
+                                page_content=text,
+                                metadata={"source": temp_path, "page": i}
+                            ))
                 
                 if not documents:
                     processing_status[contract_id] = "failed"
